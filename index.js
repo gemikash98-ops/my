@@ -1,166 +1,140 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { default as makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
-import { spawn, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn, execSync } from 'child_process';
 import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const targetGroups = ['120363419930344447@g.us'];
+// --- CONFIGURATION ---
+const AUTH_PATH = './auth_info_baileys';
+const targetGroups = ['120363419930344447@g.us']; // උඹේ Group ID එක
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const YTS_API = 'https://movies-api.accel.li/api/v2/list_movies.json';
-
-const categories = ['horror', 'comedy', 'action', 'sci-fi', 'thriller', 'animation', 'adventure', 'crime', 'fantasy', 'mystery'];
+const categories = ['horror', 'comedy', 'action', 'sci-fi', 'thriller', 'animation', 'adventure', 'fantasy'];
 let currentCatIndex = 0;
 
+// Directories හදමු
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 if (!fs.existsSync('./sent')) fs.mkdirSync('./sent');
 
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    // GitHub එකට දාපු creds.json එක මෙතනින් load වෙනවා
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
+    
     const sock = makeWASocket({
         auth: state,
-        logger: pino({ level: 'silent' }),
-        browser: ["Akash-AI-Turbo", "Chrome", "1.0.0"]
+        logger: pino({ level: 'info' }), // ටර්මිනල් එකේ විස්තර පේන්න
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        printQRInTerminal: false // දැන් QR ඕනේ නැති නිසා මේක false කළා
     });
 
     sock.ev.on('creds.update', saveCreds);
+
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
+        const { connection, lastDisconnect } = update;
         if (connection === 'open') {
-            console.log('--- ✅ MOVIE RUNNER IS ONLINE ---');
+            console.log('\n🚀 ==========================================');
+            console.log('✅ BOT IS SUCCESSFULLY ONLINE!');
+            console.log('📱 Connected to WhatsApp via uploaded session.');
+            console.log('==========================================\n');
             startProcessing(sock); 
         }
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('🔄 Connection closed. Reconnecting:', shouldReconnect);
             if (shouldReconnect) connectToWhatsApp();
         }
     });
 }
 
-async function handleSubtitles(sock, movieTitle) {
-    try {
-        const cleanName = movieTitle.replace(/\(\d{4}\)/g, '').trim();
-        const search = await baiscopelksearch(cleanName);
-        if (search.results && search.results.length > 0) {
-            const subData = await baiscopelkdownload(search.results[0].url);
-            if (subData.DOWN_URL) {
-                await sock.sendMessage(targetGroups[0], { 
-                    document: { url: subData.DOWN_URL }, 
-                    fileName: `[SI-SUB]_${cleanName}.zip`, 
-                    mimetype: 'application/zip',
-                    caption: `🎬 *${movieTitle}*\n🇱🇰 සිංහල උපසිරැසිය මෙන්න!\n\n_sithum-movie-bot_`
-                });
-            }
-        }
-    } catch (e) { console.log("Sub Error"); }
-}
-
 async function startProcessing(sock) {
     while (true) {
         const category = categories[currentCatIndex];
-        console.log(`\n🔍 Checking: ${category.toUpperCase()}`);
+        console.log(`\n🔍 Checking Category: ${category.toUpperCase()}`);
 
         try {
-            const apiUrl = `${YTS_API}?genre=${category}&sort_by=latest&limit=5`;
-            const rawData = execSync(`curl -L -s --insecure "${apiUrl}"`, { encoding: 'utf8' });
-            const result = JSON.parse(rawData);
+            const response = await axios.get(`${YTS_API}?genre=${category}&sort_by=latest&limit=15`);
+            const result = response.data;
 
-            if (result.status === 'ok' && result.data.movie_count > 0) {
+            if (result.status === 'ok' && result.data.movies) {
                 for (const movie of result.data.movies) {
                     const logName = movie.title.replace(/[^a-zA-Z0-9]/g, '_');
                     
                     if (!fs.existsSync(`./sent/${logName}.txt`)) {
                         console.log(`\n🎯 New Movie Found: ${movie.title}`);
                         
-                        const movieDetails = `📽️ *MOVIE:* ${movie.title}\n\n` +
-                                           `📅 *Year:* ${movie.year}\n` +
-                                           `⭐ *Rating:* ${movie.rating}/10\n` +
-                                           `⏳ *Runtime:* ${movie.runtime} min\n` +
-                                           `📂 *Genre:* ${movie.genres.join(', ')}\n\n` +
-                                           `━━━━━━━━━━━━━━━━━━\n` +
-                                           `_sithum-movie-bot_`;
+                        const details = `📽️ *MOVIE:* ${movie.title}\n📅 *Year:* ${movie.year}\n⭐ *Rating:* ${movie.rating}/10\n📂 *Genre:* ${movie.genres.join(', ')}\n\n_sithum-movie-bot_`;
 
-                        const infoMsg = await sock.sendMessage(targetGroups[0], { 
-                            image: { url: movie.large_cover_image }, 
-                            caption: movieDetails 
-                        });
+                        // විස්තර සහ පෝස්ටර් එක යවනවා
+                        const infoMsg = await sock.sendMessage(targetGroups[0], { image: { url: movie.large_cover_image }, caption: details });
+                        const statusMsg = await sock.sendMessage(targetGroups[0], { text: `⏳ *Status:* Downloading movie...` });
 
-                        const statusMsg = await sock.sendMessage(targetGroups[0], { text: `⏳ *Status:* Preparing download...` });
-
-                        const torrent = movie.torrents[0];
+                        const torrent = movie.torrents.find(t => t.quality === '720p') || movie.torrents[0];
                         const magnet = `magnet:?xt=urn:btih:${torrent.hash}&dn=${encodeURIComponent(movie.title)}&tr=udp://tracker.opentrackr.org:1337/announce`;
 
-                        const isMovieSent = await downloadMovie(sock, movie.title, magnet, statusMsg, movieDetails, movie.large_cover_image);
+                        const success = await downloadAndSend(sock, movie.title, magnet, statusMsg, details);
 
-                        if (isMovieSent) {
-                            await sock.sendMessage(targetGroups[0], { 
-                                text: `✅ *COMPLETED:* ${movie.title}\n━━━━━━━━━━━━━━━━━━\n🍿 මූවී එක සාර්ථකව එක් කරන ලදී.`, 
-                                edit: infoMsg.key 
-                            });
-                            await handleSubtitles(sock, movie.title);
-                        } else {
-                            await sock.sendMessage(targetGroups[0], { text: `❌ *FAILED:* ${movie.title}`, edit: infoMsg.key });
+                        if (success) {
+                            await sock.sendMessage(targetGroups[0], { text: `✅ *DONE:* ${movie.title} sent successfully!`, edit: infoMsg.key });
                         }
-
+                        
                         await sock.sendMessage(targetGroups[0], { delete: statusMsg.key });
                         fs.writeFileSync(`./sent/${logName}.txt`, 'done');
-                        
-                        console.log('✅ Waiting for 30 mins...');
-                        await new Promise(r => setTimeout(r, 30 * 60 * 1000)); 
+                        console.log('🚀 Moving to next movie...');
                         break; 
                     }
                 }
             }
             currentCatIndex = (currentCatIndex + 1) % categories.length;
-            await new Promise(r => setTimeout(r, 5000)); 
-        } catch (e) { await new Promise(r => setTimeout(r, 10000)); }
+            await new Promise(r => setTimeout(r, 10000)); // විනාඩි 10ක් නවතිනවා
+        } catch (e) {
+            console.log('❌ Error in processing:', e.message);
+            await new Promise(r => setTimeout(r, 20000));
+        }
     }
 }
 
-async function downloadMovie(sock, title, magnet, statusMsg, movieDetails, posterUrl) {
+async function downloadAndSend(sock, title, magnet, statusMsg, details) {
     return new Promise((resolve) => {
-        const download = spawn('aria2c', [`--dir=${DOWNLOAD_DIR}`, '--seed-time=0', '--summary-interval=5', magnet]);
+        console.log(`⬇️ Starting download: ${title}`);
+        const dl = spawn('aria2c', [`--dir=${DOWNLOAD_DIR}`, '--seed-time=0', '--max-connection-per-server=16', '--split=16', magnet]);
         
-        download.stdout.on('data', async (data) => {
-            const output = data.toString();
-            const match = output.match(/\(([^)]+)%\)/);
+        dl.stdout.on('data', async (data) => {
+            const match = data.toString().match(/\(([^)]+)%\)/);
             if (match) {
-                const percentage = match[1];
-                try {
-                    await sock.sendMessage(targetGroups[0], { 
-                        text: `⏳ *Downloading:* ${title}\n📊 *Progress:* ${percentage}%`, 
-                        edit: statusMsg.key 
-                    });
+                try { 
+                    await sock.sendMessage(targetGroups[0], { text: `⏳ *Downloading:* ${title}\n📊 *Progress:* ${match[1]}%`, edit: statusMsg.key }); 
                 } catch (e) {}
             }
         });
 
-        download.on('close', async () => {
+        dl.on('close', async () => {
             try {
-                const files = execSync(`find "${DOWNLOAD_DIR}" -name "*.mp4" -o -name "*.mkv"`, { encoding: 'utf8' }).split('\n').filter(f => f.trim() !== '');
+                const files = execSync(`find "${DOWNLOAD_DIR}" -type f -name "*.mp4" -o -name "*.mkv"`, { encoding: 'utf8' }).split('\n').filter(f => f.trim() !== '');
                 if (files.length > 0) {
-                    const response = await axios.get(posterUrl, { responseType: 'arraybuffer' });
-                    const thumbnail = Buffer.from(response.data, 'binary');
-
+                    console.log(`📤 Uploading file to WhatsApp...`);
                     await sock.sendMessage(targetGroups[0], { 
                         document: { url: files[0].trim() }, 
                         fileName: `${title}.mp4`, 
                         mimetype: 'video/mp4',
-                        jpegThumbnail: thumbnail,
-                        caption: `🎬 *${title}*\n\n${movieDetails}\n\n🍿 *Enjoy Your Movie!*`
+                        caption: `🎬 *${title}*\n\n${details}`
                     });
                     resolve(true);
-                } else { resolve(false); }
-            } catch (err) { resolve(false); }
-            finally {
-                try { execSync(`rm -rf "${DOWNLOAD_DIR}"/*`); } catch (e) {}
+                } else {
+                    console.log('❌ No video file found after download.');
+                    resolve(false);
+                }
+            } catch (err) { 
+                console.log('❌ Error sending file:', err.message);
+                resolve(false); 
+            }
+            finally { 
+                try { execSync(`rm -rf "${DOWNLOAD_DIR}"/*`); } catch (e) {} 
             }
         });
     });
